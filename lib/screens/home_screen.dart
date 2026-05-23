@@ -1,17 +1,20 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:confetti/confetti.dart';
 import '../services/api_service.dart';
 import '../services/storage_service.dart';
 import '../services/vpn_bridge.dart';
 import '../services/app_blocker_bridge.dart';
+import '../services/notification_service.dart';
+import '../services/widget_service.dart';
 import 'setup_screen.dart';
 import 'app_picker_screen.dart';
 import 'ranking_screen.dart';
 import 'logs_screen.dart';
+import 'block_settings_screen.dart'; // サイト・アプリブロック設定タブ
+import 'onboarding_screen.dart';     // オンボーディングリセット（admin用）
 
-// Stripe課金ページ（ブラウザで開く）
-const _upgradeUrl = 'https://web-production-ed8c9.up.railway.app';
 
 class HomeScreen extends StatefulWidget {
   final String configUrl;
@@ -32,26 +35,72 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _appBlockerRunning = false;
   int _blockedAppCount = 0;
   bool _emergencyLoading = false;
+  int _tabIndex = 0;
 
   bool? _lastBlockState;
+  late final ConfettiController _confettiController;
+  int? _lastKnownStreak; // 前回pollのストリーク値（節目検知用）
+
+  static const _milestones = [7, 30, 100];
 
   @override
   void initState() {
     super.initState();
     _api = ApiService(widget.configUrl);
+    _confettiController = ConfettiController(duration: const Duration(seconds: 4));
     _initVpn();
+    NotificationService.init();
     _poll();
+    _checkBatteryOptimization();
     _timer = Timer.periodic(const Duration(seconds: 30), (_) => _poll());
   }
 
   @override
   void dispose() {
     _timer?.cancel();
+    _confettiController.dispose();
     super.dispose();
   }
 
   Future<void> _initVpn() async {
     await VpnBridge.prepareVpn();
+  }
+
+  Future<void> _checkBatteryOptimization() async {
+    final exempt = await AppBlockerBridge.hasBatteryOptimizationExemption();
+    if (!exempt && mounted) {
+      _showBatteryOptimizationDialog();
+    }
+  }
+
+  void _showBatteryOptimizationDialog() {
+    showDialog<void>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1A1A),
+        title: const Text('バッテリー最適化を無効にしてください',
+            style: TextStyle(color: Colors.white, fontSize: 15)),
+        content: const Text(
+          'バッテリー最適化が有効だと、ブロック機能がバックグラウンドで停止することがあります。\n\n「制限しない」に設定してください。',
+          style: TextStyle(color: Color(0xFF888888), fontSize: 13, height: 1.6),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('あとで',
+                style: TextStyle(color: Color(0xFF555555))),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context);
+              AppBlockerBridge.requestBatteryOptimizationExemption();
+            },
+            child: const Text('設定を開く',
+                style: TextStyle(color: Color(0xFFF97316))),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _poll() async {
@@ -80,6 +129,15 @@ class _HomeScreenState extends State<HomeScreen> {
       // アプリブロッカー制御
       final packages = await StorageService.getAndroidPackages();
       _blockedAppCount = packages.length;
+
+      // 再起動後の復帰用にブロック設定をネイティブに保存する
+      if (packages.isNotEmpty) {
+        AppBlockerBridge.saveBootConfig(
+          packages:   packages,
+          blockStart: config['block_start'] as String? ?? '08:00',
+          blockEnd:   config['block_end']   as String? ?? '21:00',
+        ).ignore();
+      }
       if (packages.isNotEmpty) {
         final hasUsage   = await AppBlockerBridge.hasUsagePermission();
         final hasOverlay = await AppBlockerBridge.hasOverlayPermission();
@@ -110,6 +168,19 @@ class _HomeScreenState extends State<HomeScreen> {
           _vpnRunning      = nowVpn;
           _appBlockerRunning = nowBlocker;
         });
+        // 節目チェック（値が変化して節目に達したときに祝福）
+        _checkMilestone(config['streak'] as int? ?? 0);
+        // ブロック開始・終了の通知をスケジュール
+        NotificationService.scheduleBlockNotifications(
+          config['block_start'] as String? ?? '08:00',
+          config['block_end']   as String? ?? '21:00',
+        );
+        // ホーム画面ウィジェットを更新
+        WidgetService.update(
+          streak:      config['streak'] as int? ?? 0,
+          isBlocking:  nowVpn,
+          isEmergency: config['emergency_unblock'] == true,
+        );
       }
     } catch (e) {
       if (mounted) {
@@ -180,6 +251,105 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  void _checkMilestone(int streak) {
+    final prev = _lastKnownStreak;
+    _lastKnownStreak = streak;
+    // 前回と値が異なり、節目に到達した瞬間だけ祝福（緊急解除後の再達成も対象）
+    if (prev != streak && _milestones.contains(streak)) {
+      _showMilestoneCelebration(streak);
+      NotificationService.showMilestone(streak);
+    }
+  }
+
+  void _showMilestoneCelebration(int days) {
+    _confettiController.play();
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      barrierColor: Colors.black.withValues(alpha: 0.85),
+      builder: (_) => Stack(
+        alignment: Alignment.topCenter,
+        children: [
+          ConfettiWidget(
+            confettiController: _confettiController,
+            blastDirectionality: BlastDirectionality.explosive,
+            numberOfParticles: 30,
+            colors: const [
+              Color(0xFFF97316),
+              Color(0xFFFFD93D),
+              Color(0xFF4ADE80),
+              Color(0xFF60A5FA),
+            ],
+          ),
+          Center(
+            child: Material(
+              color: Colors.transparent,
+              child: Container(
+                margin: const EdgeInsets.symmetric(horizontal: 32),
+                padding: const EdgeInsets.all(32),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1A1A1A),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: const Color(0xFFF97316), width: 1.5),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      days == 7 ? '🔥' : days == 30 ? '⚡' : '👑',
+                      style: const TextStyle(fontSize: 56),
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      '$days日達成！',
+                      style: const TextStyle(
+                        color: Color(0xFFF97316),
+                        fontSize: 28,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: -1,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Text(
+                      switch (days) {
+                        7  => '1週間継続できました。\n習慣が形成されています。',
+                        30 => '1ヶ月継続達成。\n本物の習慣になっています。',
+                        _  => '100日継続。\nこのレベルは本物です。',
+                      },
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        color: Color(0xFF888888),
+                        fontSize: 14,
+                        height: 1.6,
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        onPressed: () => Navigator.of(context).pop(),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFFF97316),
+                          foregroundColor: Colors.black,
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(10)),
+                        ),
+                        child: const Text('続ける',
+                            style: TextStyle(
+                                fontWeight: FontWeight.w700, fontSize: 16)),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _logout() async {
     await VpnBridge.stopVpn();
     await AppBlockerBridge.stopBlocker();
@@ -212,7 +382,7 @@ class _HomeScreenState extends State<HomeScreen> {
               Navigator.pop(context);
               AppBlockerBridge.requestOverlayPermission();
             },
-            child: const Text('設定を開く', style: TextStyle(color: Color(0xFF4DABF7))),
+            child: const Text('設定を開く', style: TextStyle(color: Color(0xFFF97316))),
           ),
         ],
       ),
@@ -240,7 +410,7 @@ class _HomeScreenState extends State<HomeScreen> {
               Navigator.pop(context);
               AppBlockerBridge.requestUsagePermission();
             },
-            child: const Text('設定を開く', style: TextStyle(color: Color(0xFF4DABF7))),
+            child: const Text('設定を開く', style: TextStyle(color: Color(0xFFF97316))),
           ),
         ],
       ),
@@ -249,21 +419,121 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _openAppPicker() async {
     final plan = _config?['plan'] as String? ?? 'free';
+    final locked = _config != null && _shouldBlock(_config!);
     await Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => AppPickerScreen(plan: plan)),
+      MaterialPageRoute(
+        builder: (_) => AppPickerScreen(plan: plan, locked: locked),
+      ),
     );
     await _poll();
   }
 
   Future<void> _openUpgradePage() async {
-    final uri = Uri.parse(_upgradeUrl);
-    if (await canLaunchUrl(uri)) {
-      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    // プラン一覧を取得してボトムシートで選択させる
+    List<Map<String, dynamic>> plans = [];
+    try {
+      plans = await _api.fetchMobilePlans();
+    } catch (_) {}
+
+    if (!mounted) return;
+
+    if (plans.isEmpty) {
+      // プラン情報取得失敗時はデフォルト月額で直接開く
+      _launchCheckout('monthly');
+      return;
+    }
+
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF1A1A1A),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (_) => _PlanSheet(plans: plans, onSelect: _launchCheckout),
+    );
+  }
+
+  Future<void> _launchCheckout(String planId) async {
+    try {
+      final url = await _api.fetchMobileCheckoutUrl(plan: planId);
+      final uri = Uri.parse(url);
+      if (await canLaunchUrl(uri)) {
+        await launchUrl(uri, mode: LaunchMode.externalApplication);
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('課金ページを開けませんでした'),
+            backgroundColor: Color(0xFF1A1A1A),
+          ),
+        );
+      }
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF0F0F0F),
+      body: IndexedStack(
+        index: _tabIndex,
+        children: [
+          _buildHomeTab(),
+          RankingScreen(
+            api: _api,
+            plan: _config?['plan'] as String? ?? 'free',
+            onUpgrade: _openUpgradePage,
+          ),
+          LogsScreen(api: _api),
+          // ブロック設定タブ：サイトブロック＋アプリブロックをまとめて管理する
+          BlockSettingsScreen(
+            api: _api,
+            config: _config,
+            onRefresh: _poll,
+            onOpenAppPicker: _openAppPicker,
+          ),
+          _buildSettingsTab(),
+        ],
+      ),
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: _tabIndex,
+        onTap: (i) => setState(() => _tabIndex = i),
+        backgroundColor: const Color(0xFF111111),
+        selectedItemColor: const Color(0xFFF97316),
+        unselectedItemColor: const Color(0xFF555555),
+        type: BottomNavigationBarType.fixed,
+        items: const [
+          BottomNavigationBarItem(
+            icon: Icon(Icons.home_outlined),
+            activeIcon: Icon(Icons.home),
+            label: 'ホーム',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.leaderboard_outlined),
+            activeIcon: Icon(Icons.leaderboard),
+            label: 'ランキング',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.history),
+            label: 'ログ',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.shield_outlined),
+            activeIcon: Icon(Icons.shield),
+            label: 'ブロック設定',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.person_outline),
+            activeIcon: Icon(Icons.person),
+            label: '設定',
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHomeTab() {
     final emergency  = _config?['emergency_unblock'] == true;
     final blocking   = _vpnRunning && !emergency;
     final streak     = _config?['streak'] ?? 0;
@@ -277,40 +547,28 @@ class _HomeScreenState extends State<HomeScreen> {
     final shouldBlockNow = _config != null && _shouldBlock(_config!) && !emergency;
     final isPremium  = (_config?['plan'] as String?) == 'premium';
 
-    return Scaffold(
-      backgroundColor: const Color(0xFF0F0F0F),
-      body: SafeArea(
+    return SafeArea(
         child: RefreshIndicator(
           onRefresh: _poll,
-          color: const Color(0xFF4DABF7),
+          color: const Color(0xFFF97316),
           backgroundColor: const Color(0xFF1A1A1A),
           child: ListView(
             padding: const EdgeInsets.all(20),
             children: [
               // ヘッダー
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  const Text('Toxov',
-                      style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 26,
-                          fontWeight: FontWeight.w800,
-                          letterSpacing: -1)),
-                  TextButton(
-                    onPressed: _logout,
-                    child: const Text('接続解除',
-                        style: TextStyle(color: Color(0xFF555555), fontSize: 13)),
-                  ),
-                ],
-              ),
+              const Text('Toxov',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 26,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: -1)),
               const SizedBox(height: 16),
 
               if (_loading)
                 const Center(
                   child: Padding(
                     padding: EdgeInsets.all(40),
-                    child: CircularProgressIndicator(color: Color(0xFF4DABF7)),
+                    child: CircularProgressIndicator(color: Color(0xFFF97316)),
                   ),
                 )
               else if (_error != null)
@@ -319,7 +577,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   TextButton(
                       onPressed: _poll,
                       child: const Text('再試行',
-                          style: TextStyle(color: Color(0xFF4DABF7)))),
+                          style: TextStyle(color: Color(0xFFF97316)))),
                 ]))
               else ...[
                 // ── ストリークカード ──
@@ -340,8 +598,9 @@ class _HomeScreenState extends State<HomeScreen> {
                           style: TextStyle(color: Color(0xFF888888), fontSize: 16)),
                     ],
                   ),
-                  const Text('緊急解除なしで継続中',
-                      style: TextStyle(color: Color(0xFF555555), fontSize: 12)),
+                  Text(
+                      _config?['streak_comment'] as String? ?? '継続中',
+                      style: const TextStyle(color: Color(0xFF555555), fontSize: 12)),
                 ]))),
                 const SizedBox(height: 12),
 
@@ -416,17 +675,20 @@ class _HomeScreenState extends State<HomeScreen> {
                         ],
                       ),
                     ),
-                    const Icon(Icons.chevron_right,
-                        color: Color(0xFF555555), size: 20),
+                    Icon(
+                      shouldBlockNow ? Icons.lock_outline : Icons.chevron_right,
+                      color: shouldBlockNow
+                          ? const Color(0xFFF97316)
+                          : const Color(0xFF555555),
+                      size: 20,
+                    ),
                   ])),
                 ),
                 const SizedBox(height: 8),
 
                 // ── ポイント・ランクカード ──
                 GestureDetector(
-                  onTap: () => Navigator.push(context,
-                      MaterialPageRoute(
-                          builder: (_) => RankingScreen(api: _api))),
+                  onTap: () => setState(() => _tabIndex = 1),
                   child: _card(child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -450,7 +712,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                     style: TextStyle(color: Color(0xFF555555), fontSize: 11)),
                                 Text('$seasonPts pt',
                                     style: const TextStyle(
-                                        color: Color(0xFF4DABF7),
+                                        color: Color(0xFFF97316),
                                         fontSize: 15,
                                         fontWeight: FontWeight.w700)),
                               ]),
@@ -479,7 +741,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             minHeight: 4,
                             backgroundColor: const Color(0xFF2A2A2A),
                             valueColor: const AlwaysStoppedAnimation(
-                                Color(0xFF4DABF7)),
+                                Color(0xFFF97316)),
                           ),
                         ),
                         const SizedBox(height: 4),
@@ -496,9 +758,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
                 // ── ログカード ──
                 GestureDetector(
-                  onTap: () => Navigator.push(context,
-                      MaterialPageRoute(
-                          builder: (_) => LogsScreen(api: _api))),
+                  onTap: () => setState(() => _tabIndex = 2),
                   child: _card(child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: const [
@@ -510,57 +770,13 @@ class _HomeScreenState extends State<HomeScreen> {
                       Row(children: [
                         Text('詳細を見る',
                             style: TextStyle(
-                                color: Color(0xFF4DABF7), fontSize: 13)),
+                                color: Color(0xFFF97316), fontSize: 13)),
                         Icon(Icons.chevron_right,
-                            color: Color(0xFF4DABF7), size: 18),
+                            color: Color(0xFFF97316), size: 18),
                       ]),
                     ],
                   )),
                 ),
-                const SizedBox(height: 8),
-
-                // ── Premiumアップグレードバナー（無料プランのみ表示）──
-                if (!isPremium && _config != null)
-                  GestureDetector(
-                    onTap: _openUpgradePage,
-                    child: Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(
-                        gradient: const LinearGradient(
-                          colors: [Color(0xFF1A1228), Color(0xFF1A1A2E)],
-                        ),
-                        border: Border.all(
-                            color: const Color(0xFF7950F2).withValues(alpha: 0.4)),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Row(
-                        children: [
-                          const Text('⚡', style: TextStyle(fontSize: 20)),
-                          const SizedBox(width: 12),
-                          const Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text('Premium にアップグレード',
-                                    style: TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 14,
-                                        fontWeight: FontWeight.w700)),
-                                SizedBox(height: 2),
-                                Text('アプリブロック無制限・シールドなど',
-                                    style: TextStyle(
-                                        color: Color(0xFF888888),
-                                        fontSize: 12)),
-                              ],
-                            ),
-                          ),
-                          const Icon(Icons.chevron_right,
-                              color: Color(0xFF7950F2), size: 20),
-                        ],
-                      ),
-                    ),
-                  ),
                 const SizedBox(height: 20),
 
                 // ── 緊急解除ボタン（ブロック時間内のみ表示）──
@@ -592,6 +808,261 @@ class _HomeScreenState extends State<HomeScreen> {
             ],
           ),
         ),
+    );
+  }
+
+  Future<void> _adminSetPlan(String plan) async {
+    try {
+      await _api.adminSetPlan(plan);
+      await _poll();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('プランを $plan に変更しました'),
+            backgroundColor: const Color(0xFF1A1A1A),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('プラン変更に失敗しました')),
+        );
+      }
+    }
+  }
+
+  Widget _buildSettingsTab() {
+    final isPremium = (_config?['plan'] as String?) == 'premium';
+    final isAdmin   = (_config?['role'] as String?) == 'admin';
+    final username  = _config?['username'] as String?;
+    return SafeArea(
+      child: ListView(
+        padding: const EdgeInsets.all(20),
+        children: [
+          const SizedBox(height: 8),
+          const Text('設定',
+              style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 22,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: -0.5)),
+          const SizedBox(height: 24),
+
+          // プランカード
+          _card(child: Row(
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: isPremium
+                      ? const Color(0xFFF97316).withValues(alpha: 0.15)
+                      : const Color(0xFF2A2A2A),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(
+                  isPremium ? Icons.workspace_premium : Icons.lock_outline,
+                  color: isPremium
+                      ? const Color(0xFFF97316)
+                      : const Color(0xFF555555),
+                  size: 20,
+                ),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      isPremium ? 'Premium' : '無料プラン',
+                      style: TextStyle(
+                          color: isPremium
+                              ? const Color(0xFFF97316)
+                              : Colors.white,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700),
+                    ),
+                    Text(
+                      isPremium
+                          ? 'アプリブロック無制限・シールド使用可'
+                          : 'アプリブロックは3個まで',
+                      style: const TextStyle(
+                          color: Color(0xFF555555), fontSize: 12),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          )),
+          const SizedBox(height: 12),
+
+          // アップグレード or 管理ボタン
+          if (!isPremium)
+            GestureDetector(
+              onTap: _openUpgradePage,
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(18),
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(
+                    colors: [Color(0xFF2A1500), Color(0xFF1A1A00)],
+                  ),
+                  border: Border.all(
+                      color: const Color(0xFFF97316).withValues(alpha: 0.5)),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(children: [
+                  const Text('⚡', style: TextStyle(fontSize: 22)),
+                  const SizedBox(width: 14),
+                  const Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Premium にアップグレード',
+                            style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 15,
+                                fontWeight: FontWeight.w700)),
+                        SizedBox(height: 3),
+                        Text('7日間無料トライアル付き',
+                            style: TextStyle(
+                                color: Color(0xFF888888), fontSize: 12)),
+                      ],
+                    ),
+                  ),
+                  const Icon(Icons.arrow_forward_ios,
+                      color: Color(0xFFF97316), size: 16),
+                ]),
+              ),
+            ),
+          const SizedBox(height: 24),
+
+          // ── Admin専用：プラン切り替え・デバッグ ──
+          if (isAdmin) ...[
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: const Color(0xFF0A0A0A),
+                border: Border.all(color: const Color(0xFF333333)),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Row(children: [
+                    Icon(Icons.admin_panel_settings,
+                        color: Color(0xFF888888), size: 15),
+                    SizedBox(width: 6),
+                    Text('Admin — プラン切り替え',
+                        style: TextStyle(
+                            color: Color(0xFF888888),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600)),
+                  ]),
+                  const SizedBox(height: 12),
+                  Row(children: [
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: isPremium
+                            ? () => _adminSetPlan('free')
+                            : null,
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: const Color(0xFF888888),
+                          side: BorderSide(
+                              color: isPremium
+                                  ? const Color(0xFF444444)
+                                  : const Color(0xFF222222)),
+                          shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(8)),
+                        ),
+                        child: const Text('Free に変更',
+                            style: TextStyle(fontSize: 13)),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: !isPremium
+                            ? () => _adminSetPlan('premium')
+                            : null,
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: const Color(0xFFF97316),
+                          side: BorderSide(
+                              color: !isPremium
+                                  ? const Color(0xFFF97316)
+                                      .withValues(alpha: 0.5)
+                                  : const Color(0xFF222222)),
+                          shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(8)),
+                        ),
+                        child: const Text('Premium に変更',
+                            style: TextStyle(fontSize: 13)),
+                      ),
+                    ),
+                  ]),
+                  const SizedBox(height: 16),
+                  const Divider(color: Color(0xFF222222), height: 1),
+                  const SizedBox(height: 16),
+                  const Row(children: [
+                    Icon(Icons.bug_report_outlined,
+                        color: Color(0xFF888888), size: 15),
+                    SizedBox(width: 6),
+                    Text('Admin — デバッグ',
+                        style: TextStyle(
+                            color: Color(0xFF888888),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600)),
+                  ]),
+                  const SizedBox(height: 12),
+                  // オンボーディングをリセットして最初のガイド画面に戻る
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton(
+                      onPressed: () async {
+                        await StorageService.clearOnboardingDone();
+                        if (context.mounted) {
+                          Navigator.of(context).pushReplacement(
+                            MaterialPageRoute(
+                              builder: (_) => OnboardingScreen(
+                                  configUrl: widget.configUrl),
+                            ),
+                          );
+                        }
+                      },
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: const Color(0xFF888888),
+                        side: const BorderSide(color: Color(0xFF333333)),
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(8)),
+                      ),
+                      child: const Text('オンボーディングをリセット',
+                          style: TextStyle(fontSize: 13)),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 24),
+          ],
+
+          // ログアウト
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton(
+              onPressed: _logout,
+              style: OutlinedButton.styleFrom(
+                foregroundColor: const Color(0xFF888888),
+                side: const BorderSide(color: Color(0xFF2A2A2A)),
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10)),
+              ),
+              child: const Text('接続解除', style: TextStyle(fontSize: 14)),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -634,4 +1105,159 @@ class _HomeScreenState extends State<HomeScreen> {
         'Seed': '🌱',
       }[name] ??
       '🌱';
+}
+
+// プラン選択ボトムシート
+class _PlanSheet extends StatelessWidget {
+  final List<Map<String, dynamic>> plans;
+  final void Function(String planId) onSelect;
+
+  const _PlanSheet({required this.plans, required this.onSelect});
+
+  String _formatAmount(Map<String, dynamic> plan) {
+    final amount   = plan['amount'] as int? ?? 0;
+    final currency = (plan['currency'] as String? ?? 'jpy').toLowerCase();
+    final interval = plan['interval'] as String?;
+    final amountStr = currency == 'jpy'
+        ? '¥${_formatNumber(amount)}'
+        : '\$${(amount / 100).toStringAsFixed(0)}';
+    final suffix = interval == 'month' ? '/月' : interval == 'year' ? '/年' : '';
+    return '$amountStr$suffix';
+  }
+
+  String _formatNumber(int n) {
+    // 3桁カンマ区切り
+    return n.toString().replaceAllMapped(
+        RegExp(r'(\d)(?=(\d{3})+$)'), (m) => '${m[1]},');
+  }
+
+  void _showEarlybirdInfo(BuildContext context) {
+    showDialog<void>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1A1A),
+        title: const Text('アーリーバードとは？',
+            style: TextStyle(color: Colors.white, fontSize: 16)),
+        content: const Text(
+          '早期申し込み限定の特別価格プランです。\n\n'
+          '通常年額より大幅に割引された価格で、Premiumの全機能をご利用いただけます。\n\n'
+          '※この価格は予告なく終了する場合があります。',
+          style: TextStyle(
+              color: Color(0xFF888888), fontSize: 13, height: 1.6),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('閉じる',
+                style: TextStyle(color: Color(0xFFF97316))),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 24, 20, 32),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('料金プランを選択',
+              style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w700)),
+          const SizedBox(height: 6),
+          const Text('7日間無料トライアル付き',
+              style: TextStyle(color: Color(0xFF888888), fontSize: 13)),
+          const SizedBox(height: 20),
+          ...plans.map((plan) => _planTile(context, plan)),
+        ],
+      ),
+    );
+  }
+
+  Widget _planTile(BuildContext context, Map<String, dynamic> plan) {
+    final planId       = plan['id'] as String? ?? '';
+    final label        = plan['label'] as String? ?? '';
+    final isEarlybird  = planId == 'earlybird';
+
+    return GestureDetector(
+      onTap: () {
+        Navigator.pop(context);
+        onSelect(planId);
+      },
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 10),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        decoration: BoxDecoration(
+          color: const Color(0xFF111111),
+          border: Border.all(
+              color: isEarlybird
+                  ? const Color(0xFFF97316).withValues(alpha: 0.5)
+                  : const Color(0xFF2A2A2A)),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Row(children: [
+          // ラベル＋バッジ
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(children: [
+                  Flexible(
+                    child: Text(label,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600)),
+                  ),
+                  if (isEarlybird) ...[
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF97316).withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: const Text('おすすめ',
+                          style: TextStyle(
+                              color: Color(0xFFF97316),
+                              fontSize: 10,
+                              fontWeight: FontWeight.w700)),
+                    ),
+                  ],
+                ]),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          // 金額
+          Text(_formatAmount(plan),
+              style: const TextStyle(
+                  color: Color(0xFFF97316),
+                  fontSize: 15,
+                  fontWeight: FontWeight.w700)),
+          // アーリーバード説明ボタン
+          if (isEarlybird)
+            GestureDetector(
+              onTap: () => _showEarlybirdInfo(context),
+              child: const Padding(
+                padding: EdgeInsets.only(left: 6),
+                child: Icon(Icons.info_outline,
+                    color: Color(0xFF888888), size: 18),
+              ),
+            )
+          else
+            const SizedBox(width: 6),
+          const Icon(Icons.arrow_forward_ios,
+              color: Color(0xFF555555), size: 13),
+        ]),
+      ),
+    );
+  }
 }
