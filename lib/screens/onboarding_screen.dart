@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../services/api_service.dart';
 import '../services/app_blocker_bridge.dart';
 import '../services/storage_service.dart';
 import 'home_screen.dart';
@@ -11,6 +12,20 @@ class OnboardingScreen extends StatefulWidget {
   State<OnboardingScreen> createState() => _OnboardingScreenState();
 }
 
+// プリセットサイト1件（block_settings_screen.dartと同じ定義）
+class _PS {
+  final String name;
+  final List<String> domains;
+  const _PS(this.name, this.domains);
+}
+
+// プリセットカテゴリ
+class _PC {
+  final String name;
+  final List<_PS> sites;
+  const _PC(this.name, this.sites);
+}
+
 class _OnboardingScreenState extends State<OnboardingScreen>
     with WidgetsBindingObserver {
   int _step = 0;
@@ -20,11 +35,42 @@ class _OnboardingScreenState extends State<OnboardingScreen>
   bool _hasOverlay = false;
   bool _hasBattery = false;
 
+  // ステップ4（ブロック設定）用
+  late final ApiService _api;
+  List<String> _step4Sites     = [];
+  bool _step4Loading            = false;
+  bool _step4Initialized        = false;
+  bool _step4Saving             = false;
+
+  // web.pyのPRESET_SITESと同じ定義（サーバー側と必ず揃えること）
+  static const _presets = [
+    _PC('動画', [
+      _PS('YouTube',  ['youtube.com', 'www.youtube.com', 'youtu.be']),
+      _PS('Netflix',  ['netflix.com']),
+      _PS('Twitch',   ['twitch.tv']),
+      _PS('ニコニコ', ['nicovideo.jp']),
+    ]),
+    _PC('SNS', [
+      _PS('X',         ['x.com', 'twitter.com']),
+      _PS('Instagram', ['instagram.com']),
+      _PS('TikTok',    ['tiktok.com']),
+      _PS('Reddit',    ['reddit.com']),
+      _PS('Facebook',  ['facebook.com']),
+      _PS('Discord',   ['discord.com']),
+    ]),
+    _PC('アダルト', [
+      _PS('Pornhub',  ['pornhub.com']),
+      _PS('xVideos',  ['xvideos.com']),
+      _PS('xHamster', ['xhamster.com']),
+    ]),
+  ];
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _checkPermissions();
+    _api = ApiService(widget.configUrl);
   }
 
   @override
@@ -36,9 +82,7 @@ class _OnboardingScreenState extends State<OnboardingScreen>
   // アプリがフォアグラウンドに戻ったら権限を再チェック
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      _checkPermissions();
-    }
+    if (state == AppLifecycleState.resumed) _checkPermissions();
   }
 
   Future<void> _checkPermissions() async {
@@ -56,9 +100,28 @@ class _OnboardingScreenState extends State<OnboardingScreen>
 
   void _next() {
     if (_step < 4) {
-      setState(() => _step++);
+      final next = _step + 1;
+      setState(() => _step = next);
+      // ステップ4に入ったらサーバーから現在のサイトリストを取得する
+      if (next == 4) _initStep4();
     } else {
       _finish();
+    }
+  }
+
+  // サーバーから現在のサイトリストを取得してステップ4の初期値にする
+  Future<void> _initStep4() async {
+    if (_step4Initialized) return;
+    setState(() => _step4Loading = true);
+    try {
+      final config = await _api.fetchConfig();
+      _step4Sites = List<String>.from(config['sites'] as List? ?? []);
+      _step4Initialized = true;
+    } catch (_) {
+      // 取得失敗時は空リストで続行する
+      _step4Initialized = true;
+    } finally {
+      if (mounted) setState(() => _step4Loading = false);
     }
   }
 
@@ -71,6 +134,31 @@ class _OnboardingScreenState extends State<OnboardingScreen>
         ),
       );
     }
+  }
+
+  // ステップ4で選択したサイトをサーバーに保存してからオンボーディングを完了する
+  Future<void> _saveAndFinish() async {
+    setState(() => _step4Saving = true);
+    try {
+      await _api.saveSites(_step4Sites);
+    } catch (_) {
+      // 保存失敗してもオンボーディングは完了させる
+    }
+    await _finish();
+  }
+
+  bool _presetActive(_PS ps) => ps.domains.every(_step4Sites.contains);
+
+  void _togglePreset(_PS ps) {
+    setState(() {
+      if (_presetActive(ps)) {
+        _step4Sites.removeWhere(ps.domains.contains);
+      } else {
+        for (final d in ps.domains) {
+          if (!_step4Sites.contains(d)) _step4Sites.add(d);
+        }
+      }
+    });
   }
 
   @override
@@ -144,14 +232,62 @@ class _OnboardingScreenState extends State<OnboardingScreen>
           description: 'バックグラウンドでブロック機能が停止しないようにするために必要です。\n\n次の画面で「制限しない」を選んでください。',
           granted: _hasBattery,
         ),
-      // ブロック設定タブの紹介ステップ（権限不要）
-      _ => _stepView(
-          icon: '🛡',
-          title: 'ブロック設定',
-          description: 'ブロック設定タブから、YouTube・X・Instagramなどのサイトや、特定のアプリをブロックできます。\n\nサイトはPCと共有されるので、PC側の設定もそのまま引き継がれます。',
-          granted: null,
-        ),
+      // ステップ4：実際にサイトを選択して初期設定するインタラクティブなステップ
+      _ => _buildBlockSettingsStep(),
     };
+  }
+
+  Widget _buildBlockSettingsStep() {
+    if (_step4Loading) {
+      return const Center(
+        child: CircularProgressIndicator(color: Color(0xFFF97316)),
+      );
+    }
+
+    return SingleChildScrollView(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('🛡', style: TextStyle(fontSize: 48)),
+          const SizedBox(height: 16),
+          const Text('ブロック設定',
+              style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 24,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: -0.5)),
+          const SizedBox(height: 10),
+          const Text(
+              'ブロックしたいサイトを選んでください。\nあとからいつでも変更できます。',
+              style: TextStyle(
+                  color: Color(0xFF888888), fontSize: 14, height: 1.6)),
+          const SizedBox(height: 24),
+
+          // カテゴリ別プリセットチップ
+          for (final cat in _presets) ...[
+            Text(cat.name,
+                style: const TextStyle(
+                    color: Color(0xFF555555),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600)),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final site in cat.sites)
+                  _OnboardingChip(
+                    label: site.name,
+                    active: _presetActive(site),
+                    onTap: () => _togglePreset(site),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 16),
+          ],
+        ],
+      ),
+    );
   }
 
   Widget _stepView({
@@ -207,9 +343,23 @@ class _OnboardingScreenState extends State<OnboardingScreen>
       return _primaryButton('始める', _next);
     }
 
-    // ブロック設定紹介ステップは常に完了ボタン（権限不要）
+    // ブロック設定ステップ：選択を保存してホーム画面へ
     if (_step == 4) {
-      return _primaryButton('完了', _finish);
+      return Column(
+        children: [
+          _primaryButton(
+            _step4Saving ? '保存中...' : '完了',
+            _step4Saving ? () {} : _saveAndFinish,
+          ),
+          const SizedBox(height: 10),
+          // ブロックするものが何もない場合などに使うスキップ
+          TextButton(
+            onPressed: _step4Saving ? null : _finish,
+            child: const Text('スキップ',
+                style: TextStyle(color: Color(0xFF555555), fontSize: 14)),
+          ),
+        ],
+      );
     }
 
     // バッテリーステップで全権限が揃っていたら次のステップへ進む
@@ -267,6 +417,49 @@ class _OnboardingScreenState extends State<OnboardingScreen>
         child: Text(label,
             style: const TextStyle(
                 fontWeight: FontWeight.w700, fontSize: 16)),
+      ),
+    );
+  }
+}
+
+// オンボーディング用プリセット選択チップ
+class _OnboardingChip extends StatelessWidget {
+  final String label;
+  final bool active;
+  final VoidCallback onTap;
+
+  const _OnboardingChip({
+    required this.label,
+    required this.active,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        decoration: BoxDecoration(
+          color: active
+              ? const Color(0xFFF97316).withValues(alpha: 0.15)
+              : const Color(0xFF1A1A1A),
+          border: Border.all(
+              color: active
+                  ? const Color(0xFFF97316)
+                  : const Color(0xFF2A2A2A)),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+              color: active
+                  ? const Color(0xFFF97316)
+                  : const Color(0xFF888888),
+              fontSize: 13,
+              fontWeight: active ? FontWeight.w600 : FontWeight.w400),
+        ),
       ),
     );
   }
