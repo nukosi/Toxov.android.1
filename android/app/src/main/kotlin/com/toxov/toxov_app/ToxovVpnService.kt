@@ -23,20 +23,20 @@ class ToxovVpnService : VpnService() {
         const val ACTION_STOP  = "com.toxov.ACTION_STOP"
         const val EXTRA_DOMAINS = "domains"
 
-        // FlutterのMethodChannelからisRunning状態を参照するためstaticに持つ
-        @Volatile var isRunning = false
+        // FlutterのMethodChannelおよびToxovAccessibilityServiceから参照するためstaticに持つ
+        @Volatile var isRunning      = false
+        @Volatile var blockedDomains: Set<String> = emptySet()
     }
 
     private var pfd: ParcelFileDescriptor? = null
     private var running = false
-    private var blockedDomains: Set<String> = emptySet()
     private val upstreamDns: InetAddress = InetAddress.getByName("8.8.8.8")
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
                 val domains = intent.getStringArrayListExtra(EXTRA_DOMAINS) ?: emptyList()
-                // ドメインは小文字に正規化してから保持する
+                // ドメインは小文字に正規化してstaticに保持（AccessibilityServiceからも参照する）
                 blockedDomains = domains.map { it.lowercase() }.toSet()
                 start()
             }
@@ -55,6 +55,15 @@ class ToxovVpnService : VpnService() {
             // DNSトラフィックだけVPN経由にする（他のHTTPS等はそのままインターネットへ）
             .addDnsServer("10.233.0.2")    // 仮想DNSサーバーアドレス
             .addRoute("10.233.0.2", 32)    // 仮想DNSへのルートのみVPN経由
+            // TikTokなど一部アプリはシステムDNSを無視して主要DNSサーバーに直接クエリを送る
+            // それらのIPもVPN経由にすることで、ポート53 UDPは傍受・ポート443（DoH）は遮断する
+            // forwardDns内でprotect()済みのソケットを使うため8.8.8.8へのループは起きない
+            .addRoute("8.8.8.8", 32)           // Google DNS
+            .addRoute("8.8.4.4", 32)           // Google DNS
+            .addRoute("1.1.1.1", 32)           // Cloudflare DNS
+            .addRoute("1.0.0.1", 32)           // Cloudflare DNS
+            .addRoute("9.9.9.9", 32)           // Quad9
+            .addRoute("149.112.112.112", 32)   // Quad9
             .setMtu(1500)
             .setBlocking(true)
 
@@ -67,8 +76,9 @@ class ToxovVpnService : VpnService() {
     }
 
     private fun stop() {
-        running = false
-        isRunning = false
+        running       = false
+        isRunning     = false
+        blockedDomains = emptySet()  // AccessibilityServiceへの参照もクリア
         pfd?.close()
         pfd = null
         stopForeground(true)
