@@ -3,6 +3,7 @@ package com.toxov.toxov_app
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.content.Context
 import android.content.Intent
 import android.net.VpnService
 import android.os.Build
@@ -15,40 +16,93 @@ import java.net.InetAddress
 import java.nio.ByteBuffer
 
 // AndroidのVpnService APIを使ってローカルVPNトンネルを張り、
-// DNS（UDP:53）クエリを傍受してブロック対象ドメインへの応答を 0.0.0.0 に書き換える
+// DNS（UDP:53）クエリを傍受してブロック対象ドメインへの応答を 0.0.0.0 に書き換える。
+// AppBlockerServiceと同様のスケジュールループを持ち、
+// アプリが閉じていてもブロック時間帯に自律的にVPNを開始・終了する。
 class ToxovVpnService : VpnService() {
 
     companion object {
-        const val ACTION_START = "com.toxov.ACTION_START"
-        const val ACTION_STOP  = "com.toxov.ACTION_STOP"
-        const val EXTRA_DOMAINS = "domains"
+        const val ACTION_START      = "com.toxov.ACTION_START"
+        const val ACTION_STOP       = "com.toxov.ACTION_STOP"
+        const val EXTRA_DOMAINS     = "domains"
+        const val EXTRA_BLOCK_START = "blockStart"
+        const val EXTRA_BLOCK_END   = "blockEnd"
+        const val EXTRA_EMERGENCY   = "emergency"
 
         // FlutterのMethodChannelおよびToxovAccessibilityServiceから参照するためstaticに持つ
         @Volatile var isRunning      = false
         @Volatile var blockedDomains: Set<String> = emptySet()
     }
 
-    private var pfd: ParcelFileDescriptor? = null
-    private var running = false
+    private var tunnel: ParcelFileDescriptor? = null
+    private var serviceActive = false
+    private var blockStartMin = 0
+    private var blockEndMin   = 0
+    @Volatile private var emergency = false
     private val upstreamDns: InetAddress = InetAddress.getByName("8.8.8.8")
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
+        // START_STICKYでシステム再起動後にintentがnullで呼ばれた場合はSharedPreferencesから復元する
+        val prefs = getSharedPreferences("toxov_boot", Context.MODE_PRIVATE)
+        val action = intent?.action ?: ACTION_START
+
+        when (action) {
             ACTION_START -> {
-                val domains = intent.getStringArrayListExtra(EXTRA_DOMAINS) ?: emptyList()
-                // ドメインは小文字に正規化してstaticに保持（AccessibilityServiceからも参照する）
+                val sitesStr = intent?.getStringArrayListExtra(EXTRA_DOMAINS)?.joinToString(",")
+                    ?: prefs.getString("vpn_sites", "") ?: ""
+                val start = intent?.getStringExtra(EXTRA_BLOCK_START)
+                    ?: prefs.getString("block_start", "08:00") ?: "08:00"
+                val end = intent?.getStringExtra(EXTRA_BLOCK_END)
+                    ?: prefs.getString("block_end", "21:00") ?: "21:00"
+                val emerg = intent?.getBooleanExtra(EXTRA_EMERGENCY, false) ?: false
+
+                val domains = if (sitesStr.isBlank()) emptyList() else sitesStr.split(",")
                 blockedDomains = domains.map { it.lowercase() }.toSet()
-                start()
+                blockStartMin  = parseTime(start)
+                blockEndMin    = parseTime(end)
+                emergency      = emerg
+
+                // intentがある（Flutter呼び出し）場合だけSharedPreferencesを更新する
+                if (intent != null) {
+                    prefs.edit()
+                        .putString("vpn_sites",   sitesStr)
+                        .putString("block_start", start)
+                        .putString("block_end",   end)
+                        .apply()
+                }
+
+                if (!serviceActive) {
+                    serviceActive = true
+                    startForeground(1, buildNotification())
+                    // スケジュールループを別スレッドで起動する（メインスレッドをブロックしない）
+                    Thread { scheduleLoop() }.start()
+                }
+
+                // 緊急解除時はトンネルを即座に切る（次の30秒サイクルを待たない）
+                if (emergency) closeTunnel()
+                updateNotification()
             }
-            ACTION_STOP -> stop()
+            ACTION_STOP -> stopAll()
         }
         return START_STICKY
     }
 
-    private fun start() {
-        if (running) return
-        startForeground(1, buildNotification())
+    // ブロック時間帯かどうかを30秒ごとに確認し、VPNトンネルを開閉する。
+    // AppBlockerServiceと同じパターンで常駐することで、アプリを開かなくてもブロックが機能する。
+    private fun scheduleLoop() {
+        while (serviceActive) {
+            val shouldBlock = !emergency && isInBlockTime()
+            if (shouldBlock && tunnel == null) {
+                openTunnel()
+            } else if (!shouldBlock && tunnel != null) {
+                closeTunnel()
+            }
+            updateNotification()
+            Thread.sleep(30_000)
+        }
+    }
 
+    private fun openTunnel() {
         val builder = Builder()
             .setSession("Toxov")
             .addAddress("10.233.0.1", 24)
@@ -66,35 +120,41 @@ class ToxovVpnService : VpnService() {
             .addRoute("149.112.112.112", 32)   // Quad9
             .setMtu(1500)
             .setBlocking(true)
-
-        pfd = builder.establish() ?: return
-        running = true
+        val fd = builder.establish() ?: return  // VPN権限がなければnullを返す
+        tunnel    = fd
         isRunning = true
-
         // パケット処理はメインスレッドをブロックしないようにスレッドで回す
-        Thread { runLoop() }.start()
+        Thread { runLoop(fd) }.start()
     }
 
-    private fun stop() {
-        running       = false
-        isRunning     = false
-        blockedDomains = emptySet()  // AccessibilityServiceへの参照もクリア
-        pfd?.close()
-        pfd = null
+    private fun closeTunnel() {
+        tunnel?.close()
+        tunnel    = null
+        isRunning = false
+    }
+
+    private fun stopAll() {
+        serviceActive = false
+        closeTunnel()
+        blockedDomains = emptySet()
         stopForeground(true)
         stopSelf()
     }
 
-    private fun runLoop() {
-        val input  = FileInputStream(pfd!!.fileDescriptor)
-        val output = FileOutputStream(pfd!!.fileDescriptor)
+    // fdが close されると read() が IOException を投げてループを抜ける
+    private fun runLoop(fd: ParcelFileDescriptor) {
+        val input  = FileInputStream(fd.fileDescriptor)
+        val output = FileOutputStream(fd.fileDescriptor)
         val buf    = ByteArray(32767)
-
-        while (running) {
-            val len = input.read(buf)
-            if (len <= 0) continue
-            val response = processPacket(buf.copyOf(len))
-            if (response != null) output.write(response)
+        try {
+            while (true) {
+                val len = input.read(buf)
+                if (len <= 0) continue
+                val response = processPacket(buf.copyOf(len))
+                if (response != null) output.write(response)
+            }
+        } catch (_: Exception) {
+            // fd が閉じられたら正常終了
         }
     }
 
@@ -240,21 +300,39 @@ class ToxovVpnService : VpnService() {
         return sum.inv() and 0xFFFF
     }
 
+    private fun isInBlockTime(): Boolean {
+        val cal    = java.util.Calendar.getInstance()
+        val nowMin = cal.get(java.util.Calendar.HOUR_OF_DAY) * 60 +
+                     cal.get(java.util.Calendar.MINUTE)
+        return nowMin >= blockStartMin && nowMin < blockEndMin
+    }
+
+    private fun parseTime(t: String): Int {
+        val p = t.split(":")
+        return (p[0].toIntOrNull() ?: 0) * 60 + (p[1].toIntOrNull() ?: 0)
+    }
+
+    private fun updateNotification() {
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.notify(1, buildNotification())
+    }
+
     private fun buildNotification(): Notification {
         val channelId = "toxov_vpn"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val ch = NotificationChannel(channelId, "Toxov", NotificationManager.IMPORTANCE_LOW)
             getSystemService(NotificationManager::class.java).createNotificationChannel(ch)
         }
+        val text = if (tunnel != null) "ブロック動作中" else "スタンバイ中"
         return Notification.Builder(this, channelId)
             .setContentTitle("Toxov")
-            .setContentText("ブロック動作中")
+            .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .build()
     }
 
     override fun onDestroy() {
-        stop()
+        stopAll()
         super.onDestroy()
     }
 }

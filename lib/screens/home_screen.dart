@@ -106,25 +106,28 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _poll() async {
     try {
       final config = await _api.fetchConfig();
-      final shouldBlock = _shouldBlock(config);
-      final emergency = config['emergency_unblock'] == true;
-      final vpnRunning = await VpnBridge.isRunning();
+      final emergency  = config['emergency_unblock'] == true;
+      final sites      = List<String>.from(config['sites'] ?? []);
+      final blockStart = config['block_start'] as String? ?? '08:00';
+      final blockEnd   = config['block_end']   as String? ?? '21:00';
 
-      // VPN制御（Webサイトブロック）
-      if (!emergency && shouldBlock && !vpnRunning) {
-        final sites = List<String>.from(config['sites'] ?? []);
-        await VpnBridge.startVpn(sites);
-        if (_lastBlockState == false) _api.postEvent('block_start').ignore();
-        _lastBlockState = true;
-      } else if ((emergency || !shouldBlock) && vpnRunning) {
-        await VpnBridge.stopVpn();
-        if (_lastBlockState == true) {
-          _api.postEvent(emergency ? 'emergency_unblock' : 'block_end').ignore();
-        }
-        _lastBlockState = false;
-      } else {
-        _lastBlockState ??= shouldBlock && !emergency;
+      // VPN設定を常にサービスへ送信する。
+      // サービスがスケジュールを自律管理するため、アプリが閉じていてもブロックが継続する。
+      await VpnBridge.startVpn(
+        sites:      sites,
+        blockStart: blockStart,
+        blockEnd:   blockEnd,
+        emergency:  emergency,
+      );
+
+      // ブロック状態の変化を検知してイベントをサーバーに記録する
+      final vpnRunning = await VpnBridge.isRunning();
+      if (vpnRunning && _lastBlockState == false) {
+        _api.postEvent('block_start').ignore();
+      } else if (!vpnRunning && _lastBlockState == true) {
+        _api.postEvent(emergency ? 'emergency_unblock' : 'block_end').ignore();
       }
+      _lastBlockState = vpnRunning;
 
       // アプリブロッカー制御
       final packages = await StorageService.getAndroidPackages();

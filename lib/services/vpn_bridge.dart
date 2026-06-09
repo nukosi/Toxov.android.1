@@ -10,17 +10,28 @@ class VpnBridge {
     return result ?? 'denied';
   }
 
-  // VPNを開始してブロック対象ドメインリストを渡す
-  static Future<void> startVpn(List<String> sites) async {
-    await _channel.invokeMethod('startVpn', {'sites': sites});
+  // VPN設定を送信してサービスを起動・更新する。
+  // サービスはスケジュールを自律管理するため、アプリが閉じていてもブロックが継続する。
+  static Future<void> startVpn({
+    required List<String> sites,
+    required String blockStart,
+    required String blockEnd,
+    required bool emergency,
+  }) async {
+    await _channel.invokeMethod('startVpn', {
+      'sites':      sites,
+      'blockStart': blockStart,
+      'blockEnd':   blockEnd,
+      'emergency':  emergency,
+    });
   }
 
-  // VPNを停止する
+  // VPNを完全停止する（ログアウト時など）
   static Future<void> stopVpn() async {
     await _channel.invokeMethod('stopVpn');
   }
 
-  // VPNが動作中かどうかを確認する
+  // VPNが現在ブロック動作中かどうかを確認する
   static Future<bool> isRunning() async {
     final result = await _channel.invokeMethod<bool>('isRunning');
     return result ?? false;

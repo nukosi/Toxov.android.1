@@ -9,6 +9,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.net.VpnService
 import android.os.Build
+import android.os.PowerManager
 import android.os.Process
 import android.provider.Settings
 import androidx.core.app.ActivityCompat
@@ -43,10 +44,16 @@ class MainActivity : FlutterActivity() {
                         }
                     }
                     "startVpn" -> {
-                        val sites = call.argument<List<String>>("sites") ?: emptyList()
+                        val sites      = call.argument<List<String>>("sites")       ?: emptyList()
+                        val blockStart = call.argument<String>("blockStart")         ?: "08:00"
+                        val blockEnd   = call.argument<String>("blockEnd")           ?: "21:00"
+                        val emergency  = call.argument<Boolean>("emergency")         ?: false
                         val intent = Intent(this, ToxovVpnService::class.java).apply {
                             action = ToxovVpnService.ACTION_START
                             putStringArrayListExtra(ToxovVpnService.EXTRA_DOMAINS, ArrayList(sites))
+                            putExtra(ToxovVpnService.EXTRA_BLOCK_START, blockStart)
+                            putExtra(ToxovVpnService.EXTRA_BLOCK_END,   blockEnd)
+                            putExtra(ToxovVpnService.EXTRA_EMERGENCY,   emergency)
                         }
                         startForegroundService(intent)
                         result.success(null)
@@ -130,6 +137,48 @@ class MainActivity : FlutterActivity() {
                         result.success(null)
                     }
 
+                    // バッテリー最適化の除外対象になっているか確認する
+                    "hasBatteryOptimizationExemption" -> {
+                        val pm = getSystemService(POWER_SERVICE) as PowerManager
+                        result.success(pm.isIgnoringBatteryOptimizations(packageName))
+                    }
+
+                    // バッテリー最適化の除外設定画面を開く
+                    "requestBatteryOptimizationExemption" -> {
+                        val intent = Intent(
+                            Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                            Uri.parse("package:$packageName")
+                        )
+                        startActivity(intent)
+                        result.success(null)
+                    }
+
+                    // ToxovAccessibilityServiceが有効になっているか確認する
+                    "hasAccessibilityPermission" -> {
+                        result.success(checkAccessibilityPermission())
+                    }
+
+                    // アクセシビリティ設定画面を開く（一覧からToxovを探してオンにする）
+                    "requestAccessibilityPermission" -> {
+                        startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        })
+                        result.success(null)
+                    }
+
+                    // 再起動後の復帰用に設定をネイティブSharedPreferencesに保存する
+                    "saveBootConfig" -> {
+                        val packages   = call.argument<List<String>>("packages") ?: emptyList()
+                        val blockStart = call.argument<String>("blockStart") ?: "08:00"
+                        val blockEnd   = call.argument<String>("blockEnd")   ?: "21:00"
+                        getSharedPreferences("toxov_boot", Context.MODE_PRIVATE).edit()
+                            .putString("packages",    packages.joinToString(","))
+                            .putString("block_start", blockStart)
+                            .putString("block_end",   blockEnd)
+                            .apply()
+                        result.success(null)
+                    }
+
                     else -> result.notImplemented()
                 }
             }
@@ -159,6 +208,15 @@ class MainActivity : FlutterActivity() {
             pendingResult?.success(if (resultCode == RESULT_OK) "granted" else "denied")
             pendingResult = null
         }
+    }
+
+    // ToxovAccessibilityServiceがシステムの有効サービス一覧に含まれているか確認する
+    private fun checkAccessibilityPermission(): Boolean {
+        val serviceId = "$packageName/${ToxovAccessibilityService::class.java.name}"
+        val enabled = Settings.Secure.getString(
+            contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        ) ?: return false
+        return enabled.split(':').any { it.equals(serviceId, ignoreCase = true) }
     }
 
     // AppOpsManagerでPACKAGE_USAGE_STATS権限が付与されているか確認する
