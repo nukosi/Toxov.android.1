@@ -430,83 +430,186 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // 期間ブロックの設定ダイアログを表示し、設定する
+  // 期間ブロックの設定ダイアログを表示し、設定する（PCと同じ日数・時間入力）
   Future<void> _showBlockUntilDialog() async {
-    final isPremium = (_config?['plan'] as String?) == 'premium';
-    // プリセット時間の選択肢（無料プランは24時間まで）
-    final presets = isPremium
-        ? [
-            const _BlockDuration(label: '6時間',   hours: 6),
-            const _BlockDuration(label: '12時間',  hours: 12),
-            const _BlockDuration(label: '24時間',  hours: 24),
-            const _BlockDuration(label: '3日間',   hours: 72),
-            const _BlockDuration(label: '7日間',   hours: 168),
-          ]
-        : [
-            const _BlockDuration(label: '6時間',   hours: 6),
-            const _BlockDuration(label: '12時間',  hours: 12),
-            const _BlockDuration(label: '24時間',  hours: 24),
-          ];
+    final isPremium  = (_config?['plan'] as String?) == 'premium';
+    // await前にScaffoldMessengerを取得してasync gap越えのBuildContext参照を避ける
+    final messenger  = ScaffoldMessenger.of(context);
+    // 無料プランは最大24時間（日数0固定、時間1〜24）
+    // Premiumは最大365日（日数0〜365、時間0〜23）
+    int days  = 0;
+    int hours = isPremium ? 0 : 24;
+    final maxDays  = isPremium ? 365 : 0;
+    final maxHours = isPremium ? 23 : 24;
+    final minHours = isPremium ? 0 : 1;
 
-    final selected = await showDialog<_BlockDuration>(
+    final confirmed = await showDialog<bool>(
       context: context,
-      builder: (_) => AlertDialog(
-        backgroundColor: const Color(0xFF1A1A1A),
-        title: const Text('期間ブロック', style: TextStyle(color: Colors.white)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (!isPremium)
-              const Padding(
-                padding: EdgeInsets.only(bottom: 12),
-                child: Text('無料プランは最大24時間まで',
-                    style: TextStyle(color: Color(0xFF888888), fontSize: 12)),
-              ),
-            ...presets.map((p) => GestureDetector(
-              onTap: () => Navigator.pop(context, p),
-              child: Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 14),
-                margin: const EdgeInsets.only(bottom: 8),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF111111),
-                  border: Border.all(color: const Color(0xFF2A2A2A)),
-                  borderRadius: BorderRadius.circular(8),
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setStateDialog) {
+          // 合計が0時間かどうか（設定ボタンの有効判定）
+          final totalHours = days * 24 + hours;
+
+          // カウンター行：ラベル＋マイナスボタン＋数値＋プラスボタン
+          Widget counter({
+            required String label,
+            required int value,
+            required int min,
+            required int max,
+            required void Function(int) onChange,
+            bool disabled = false,
+          }) {
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(label,
+                    style: const TextStyle(color: Color(0xFF888888), fontSize: 12)),
+                const SizedBox(height: 8),
+                Row(mainAxisSize: MainAxisSize.min, children: [
+                  // マイナスボタン
+                  GestureDetector(
+                    onTap: disabled || value <= min
+                        ? null
+                        : () => setStateDialog(() => onChange(value - 1)),
+                    child: Container(
+                      width: 36, height: 36,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF2A2A2A),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Center(
+                        child: Text('−',
+                            style: TextStyle(
+                                color: (disabled || value <= min)
+                                    ? const Color(0xFF333333)
+                                    : Colors.white,
+                                fontSize: 18)),
+                      ),
+                    ),
+                  ),
+                  // 数値表示
+                  Container(
+                    width: 56,
+                    alignment: Alignment.center,
+                    child: Text(
+                      '$value',
+                      style: TextStyle(
+                          color: disabled
+                              ? const Color(0xFF444444)
+                              : Colors.white,
+                          fontSize: 22,
+                          fontWeight: FontWeight.w700),
+                    ),
+                  ),
+                  // プラスボタン
+                  GestureDetector(
+                    onTap: disabled || value >= max
+                        ? null
+                        : () => setStateDialog(() => onChange(value + 1)),
+                    child: Container(
+                      width: 36, height: 36,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF2A2A2A),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Center(
+                        child: Text('+',
+                            style: TextStyle(
+                                color: (disabled || value >= max)
+                                    ? const Color(0xFF333333)
+                                    : Colors.white,
+                                fontSize: 18)),
+                      ),
+                    ),
+                  ),
+                ]),
+              ],
+            );
+          }
+
+          return AlertDialog(
+            backgroundColor: const Color(0xFF1A1A1A),
+            title: const Text('期間ブロック', style: TextStyle(color: Colors.white)),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (!isPremium)
+                  const Padding(
+                    padding: EdgeInsets.only(bottom: 16),
+                    child: Text(
+                      '無料プランは最大24時間まで',
+                      style: TextStyle(color: Color(0xFF888888), fontSize: 12),
+                    ),
+                  ),
+                const Text(
+                  'スケジュールを無視して、指定した期間だけ常時ブロックします。',
+                  style: TextStyle(color: Color(0xFF555555), fontSize: 12, height: 1.5),
                 ),
-                child: Text(p.label,
-                    style: const TextStyle(color: Colors.white, fontSize: 15)),
+                const SizedBox(height: 24),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: [
+                    counter(
+                      label: '日',
+                      value: days,
+                      min: 0,
+                      max: maxDays,
+                      disabled: !isPremium,
+                      onChange: (v) { days = v; },
+                    ),
+                    counter(
+                      label: '時間',
+                      value: hours,
+                      min: minHours,
+                      max: maxHours,
+                      onChange: (v) { hours = v; },
+                    ),
+                  ],
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('キャンセル', style: TextStyle(color: Color(0xFF555555))),
               ),
-            )),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('キャンセル', style: TextStyle(color: Color(0xFF555555))),
-          ),
-        ],
+              TextButton(
+                onPressed: totalHours <= 0
+                    ? null
+                    : () => Navigator.pop(ctx, true),
+                child: Text(
+                  '設定する',
+                  style: TextStyle(
+                    color: totalHours > 0
+                        ? const Color(0xFFF97316)
+                        : const Color(0xFF444444),
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
       ),
     );
-    if (selected == null) return;
+    if (confirmed != true) return;
 
     try {
-      await _api.setBlockUntil(0, selected.hours);
+      await _api.setBlockUntil(days, hours);
       await _poll();
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('${selected.label}の期間ブロックを設定しました'),
-            backgroundColor: const Color(0xFF1A1A1A),
-          ),
-        );
-      }
+      final label = days > 0 && hours > 0
+          ? '$days日$hours時間'
+          : days > 0
+              ? '$days日間'
+              : '$hours時間';
+      messenger.showSnackBar(SnackBar(
+        content: Text('$labelの期間ブロックを設定しました'),
+        backgroundColor: const Color(0xFF1A1A1A),
+      ));
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('エラーが発生しました')),
-        );
-      }
+      messenger.showSnackBar(
+        const SnackBar(content: Text('エラーが発生しました')),
+      );
     }
   }
 
@@ -1282,13 +1385,6 @@ class _HomeScreenState extends State<HomeScreen> {
         'Seed': '🌱',
       }[name] ??
       '🌱';
-}
-
-// 期間ブロックのプリセット時間定義
-class _BlockDuration {
-  final String label;
-  final int hours;
-  const _BlockDuration({required this.label, required this.hours});
 }
 
 // プラン選択ボトムシート
