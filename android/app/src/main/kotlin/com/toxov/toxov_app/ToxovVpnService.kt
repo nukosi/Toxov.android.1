@@ -22,12 +22,13 @@ import java.nio.ByteBuffer
 class ToxovVpnService : VpnService() {
 
     companion object {
-        const val ACTION_START      = "com.toxov.ACTION_START"
-        const val ACTION_STOP       = "com.toxov.ACTION_STOP"
-        const val EXTRA_DOMAINS     = "domains"
-        const val EXTRA_BLOCK_START = "blockStart"
-        const val EXTRA_BLOCK_END   = "blockEnd"
-        const val EXTRA_EMERGENCY   = "emergency"
+        const val ACTION_START       = "com.toxov.ACTION_START"
+        const val ACTION_STOP        = "com.toxov.ACTION_STOP"
+        const val EXTRA_DOMAINS      = "domains"
+        const val EXTRA_BLOCK_START  = "blockStart"
+        const val EXTRA_BLOCK_END    = "blockEnd"
+        const val EXTRA_EMERGENCY    = "emergency"
+        const val EXTRA_BLOCK_UNTIL  = "blockUntil"  // 期間ブロック終了日時（JST ISO文字列）
 
         // FlutterのMethodChannelおよびToxovAccessibilityServiceから参照するためstaticに持つ
         @Volatile var isRunning      = false
@@ -38,7 +39,8 @@ class ToxovVpnService : VpnService() {
     private var serviceActive = false
     private var blockStartMin = 0
     private var blockEndMin   = 0
-    @Volatile private var emergency = false
+    @Volatile private var emergency    = false
+    @Volatile private var blockUntilMs = 0L  // 期間ブロック終了のエポックmsを保持する（0で無効）
     private val upstreamDns: InetAddress = InetAddress.getByName("8.8.8.8")
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -55,12 +57,18 @@ class ToxovVpnService : VpnService() {
                 val end = intent?.getStringExtra(EXTRA_BLOCK_END)
                     ?: prefs.getString("block_end", "21:00") ?: "21:00"
                 val emerg = intent?.getBooleanExtra(EXTRA_EMERGENCY, false) ?: false
+                // 期間ブロック：intentにある場合は使用、ない場合はSharedPreferencesから復元する
+                val blockUntilStr = if (intent != null && intent.hasExtra(EXTRA_BLOCK_UNTIL))
+                    intent.getStringExtra(EXTRA_BLOCK_UNTIL)
+                else
+                    prefs.getString("block_until", null)
 
                 val domains = if (sitesStr.isBlank()) emptyList() else sitesStr.split(",")
                 blockedDomains = domains.map { it.lowercase() }.toSet()
                 blockStartMin  = parseTime(start)
                 blockEndMin    = parseTime(end)
                 emergency      = emerg
+                blockUntilMs   = parseBlockUntil(blockUntilStr)
 
                 // intentがある（Flutter呼び出し）場合だけSharedPreferencesを更新する
                 if (intent != null) {
@@ -68,6 +76,7 @@ class ToxovVpnService : VpnService() {
                         .putString("vpn_sites",   sitesStr)
                         .putString("block_start", start)
                         .putString("block_end",   end)
+                        .putString("block_until", blockUntilStr ?: "")
                         .apply()
                 }
 
@@ -301,6 +310,8 @@ class ToxovVpnService : VpnService() {
     }
 
     private fun isInBlockTime(): Boolean {
+        // 期間ブロック中は通常スケジュールに関わらず常時ブロック
+        if (blockUntilMs > 0L && System.currentTimeMillis() < blockUntilMs) return true
         val cal    = java.util.Calendar.getInstance()
         val nowMin = cal.get(java.util.Calendar.HOUR_OF_DAY) * 60 +
                      cal.get(java.util.Calendar.MINUTE)
@@ -310,6 +321,18 @@ class ToxovVpnService : VpnService() {
     private fun parseTime(t: String): Int {
         val p = t.split(":")
         return (p[0].toIntOrNull() ?: 0) * 60 + (p[1].toIntOrNull() ?: 0)
+    }
+
+    // JST ISO文字列（"YYYY-MM-DDTHH:mm:ss"）をエポックmsに変換する。空文字・nullは0を返す
+    private fun parseBlockUntil(s: String?): Long {
+        if (s.isNullOrBlank()) return 0L
+        return try {
+            val sdf = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.JAPAN)
+            sdf.timeZone = java.util.TimeZone.getTimeZone("Asia/Tokyo")
+            sdf.parse(s)?.time ?: 0L
+        } catch (_: Exception) {
+            0L
+        }
     }
 
     private fun updateNotification() {

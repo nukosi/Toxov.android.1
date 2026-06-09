@@ -48,12 +48,14 @@ class MainActivity : FlutterActivity() {
                         val blockStart = call.argument<String>("blockStart")         ?: "08:00"
                         val blockEnd   = call.argument<String>("blockEnd")           ?: "21:00"
                         val emergency  = call.argument<Boolean>("emergency")         ?: false
+                        val blockUntil = call.argument<String>("blockUntil")         // 期間ブロック終了日時（nullで通常スケジュールのみ）
                         val intent = Intent(this, ToxovVpnService::class.java).apply {
                             action = ToxovVpnService.ACTION_START
                             putStringArrayListExtra(ToxovVpnService.EXTRA_DOMAINS, ArrayList(sites))
                             putExtra(ToxovVpnService.EXTRA_BLOCK_START, blockStart)
                             putExtra(ToxovVpnService.EXTRA_BLOCK_END,   blockEnd)
                             putExtra(ToxovVpnService.EXTRA_EMERGENCY,   emergency)
+                            if (blockUntil != null) putExtra(ToxovVpnService.EXTRA_BLOCK_UNTIL, blockUntil)
                         }
                         startForegroundService(intent)
                         result.success(null)

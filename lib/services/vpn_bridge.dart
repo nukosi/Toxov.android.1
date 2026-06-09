@@ -12,17 +12,20 @@ class VpnBridge {
 
   // VPN設定を送信してサービスを起動・更新する。
   // サービスはスケジュールを自律管理するため、アプリが閉じていてもブロックが継続する。
+  // blockUntil: 期間ブロックの終了日時（JST ISO文字列 "YYYY-MM-DDTHH:mm:ss"）。nullで通常スケジュールのみ
   static Future<void> startVpn({
     required List<String> sites,
     required String blockStart,
     required String blockEnd,
     required bool emergency,
+    String? blockUntil,
   }) async {
     await _channel.invokeMethod('startVpn', {
       'sites':      sites,
       'blockStart': blockStart,
       'blockEnd':   blockEnd,
       'emergency':  emergency,
+      if (blockUntil != null) 'blockUntil': blockUntil,
     });
   }
 

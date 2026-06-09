@@ -110,6 +110,7 @@ class _HomeScreenState extends State<HomeScreen> {
       final sites      = List<String>.from(config['sites'] ?? []);
       final blockStart = config['block_start'] as String? ?? '08:00';
       final blockEnd   = config['block_end']   as String? ?? '21:00';
+      final blockUntil = config['block_until'] as String?;
 
       // VPN設定を常にサービスへ送信する。
       // サービスがスケジュールを自律管理するため、アプリが閉じていてもブロックが継続する。
@@ -118,6 +119,7 @@ class _HomeScreenState extends State<HomeScreen> {
         blockStart: blockStart,
         blockEnd:   blockEnd,
         emergency:  emergency,
+        blockUntil: blockUntil,
       );
 
       // ブロック状態の変化を検知してイベントをサーバーに記録する
@@ -197,6 +199,14 @@ class _HomeScreenState extends State<HomeScreen> {
 
   bool _shouldBlock(Map<String, dynamic> config) {
     if (config['emergency_unblock'] == true) return false;
+    // 期間ブロック中は時間帯に関わらず常時ブロック
+    final blockUntil = config['block_until'] as String?;
+    if (blockUntil != null && blockUntil.isNotEmpty) {
+      try {
+        final until = DateTime.parse(blockUntil); // JST前提でローカル時刻として解釈する
+        if (DateTime.now().isBefore(until)) return true;
+      } catch (_) {}
+    }
     final now   = TimeOfDay.now();
     final start = (config['block_start'] as String).split(':');
     final end   = (config['block_end']   as String).split(':');
@@ -420,6 +430,100 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  // 期間ブロックの設定ダイアログを表示し、設定する
+  Future<void> _showBlockUntilDialog() async {
+    final isPremium = (_config?['plan'] as String?) == 'premium';
+    // プリセット時間の選択肢（無料プランは24時間まで）
+    final presets = isPremium
+        ? [
+            const _BlockDuration(label: '6時間',   hours: 6),
+            const _BlockDuration(label: '12時間',  hours: 12),
+            const _BlockDuration(label: '24時間',  hours: 24),
+            const _BlockDuration(label: '3日間',   hours: 72),
+            const _BlockDuration(label: '7日間',   hours: 168),
+          ]
+        : [
+            const _BlockDuration(label: '6時間',   hours: 6),
+            const _BlockDuration(label: '12時間',  hours: 12),
+            const _BlockDuration(label: '24時間',  hours: 24),
+          ];
+
+    final selected = await showDialog<_BlockDuration>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1A1A),
+        title: const Text('期間ブロック', style: TextStyle(color: Colors.white)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (!isPremium)
+              const Padding(
+                padding: EdgeInsets.only(bottom: 12),
+                child: Text('無料プランは最大24時間まで',
+                    style: TextStyle(color: Color(0xFF888888), fontSize: 12)),
+              ),
+            ...presets.map((p) => GestureDetector(
+              onTap: () => Navigator.pop(context, p),
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 14),
+                margin: const EdgeInsets.only(bottom: 8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF111111),
+                  border: Border.all(color: const Color(0xFF2A2A2A)),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(p.label,
+                    style: const TextStyle(color: Colors.white, fontSize: 15)),
+              ),
+            )),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('キャンセル', style: TextStyle(color: Color(0xFF555555))),
+          ),
+        ],
+      ),
+    );
+    if (selected == null) return;
+
+    try {
+      await _api.setBlockUntil(0, selected.hours);
+      await _poll();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('${selected.label}の期間ブロックを設定しました'),
+            backgroundColor: const Color(0xFF1A1A1A),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('エラーが発生しました')),
+        );
+      }
+    }
+  }
+
+  // 期間ブロックをキャンセルする
+  Future<void> _cancelBlockUntil() async {
+    try {
+      await _api.cancelBlockUntil();
+      await _poll();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('エラーが発生しました')),
+        );
+      }
+    }
+  }
+
   Future<void> _openAppPicker() async {
     final plan = _config?['plan'] as String? ?? 'free';
     final locked = _config != null && _shouldBlock(_config!);
@@ -536,6 +640,27 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  // 期間ブロックが現在有効かどうかを返す（emergency中も有効とみなす）
+  bool _isBlockUntilActive(Map<String, dynamic>? config) {
+    final blockUntil = config?['block_until'] as String?;
+    if (blockUntil == null || blockUntil.isEmpty) return false;
+    try {
+      return DateTime.now().isBefore(DateTime.parse(blockUntil));
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // 期間ブロックの終了日時を "MM/DD HH:mm まで" 形式に整形する
+  String _formatBlockUntil(String isoStr) {
+    try {
+      final dt = DateTime.parse(isoStr);
+      return '${dt.month}/${dt.day} ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')} まで';
+    } catch (_) {
+      return '';
+    }
+  }
+
   Widget _buildHomeTab() {
     final emergency  = _config?['emergency_unblock'] == true;
     final blocking   = _vpnRunning && !emergency;
@@ -549,6 +674,8 @@ class _HomeScreenState extends State<HomeScreen> {
     final ptsToNext  = (rankData?['pts_to_next'] as num?)?.toInt() ?? 0;
     final shouldBlockNow = _config != null && _shouldBlock(_config!) && !emergency;
     final isPremium  = (_config?['plan'] as String?) == 'premium';
+    final blockUntilActive = _isBlockUntilActive(_config);
+    final blockUntilStr    = _config?['block_until'] as String? ?? '';
 
     return SafeArea(
         child: RefreshIndicator(
@@ -638,6 +765,10 @@ class _HomeScreenState extends State<HomeScreen> {
                   const Text('サイト',
                       style: TextStyle(color: Color(0xFF555555), fontSize: 11)),
                 ])),
+                const SizedBox(height: 8),
+
+                // ── 期間ブロックカード ──
+                _buildBlockUntilCard(blockUntilActive, blockUntilStr),
                 const SizedBox(height: 8),
 
                 // ── アプリブロックカード ──
@@ -1070,6 +1201,49 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  // 期間ブロック状態カード：有効中はキャンセルボタン付き、無効中は設定ボタンを表示する
+  Widget _buildBlockUntilCard(bool active, String blockUntilStr) {
+    if (active) {
+      return _card(child: Row(children: [
+        _dot(const Color(0xFFFF6B6B)),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text('期間ブロック中',
+                style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w500)),
+            Text(_formatBlockUntil(blockUntilStr),
+                style: const TextStyle(color: Color(0xFF555555), fontSize: 12)),
+          ]),
+        ),
+        GestureDetector(
+          onTap: _cancelBlockUntil,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            decoration: BoxDecoration(
+              color: const Color(0xFF2A1A1A),
+              border: Border.all(color: const Color(0xFF3A2A2A)),
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: const Text('解除',
+                style: TextStyle(color: Color(0xFFFF6B6B), fontSize: 12, fontWeight: FontWeight.w600)),
+          ),
+        ),
+      ]));
+    }
+    return GestureDetector(
+      onTap: _showBlockUntilDialog,
+      child: _card(child: Row(children: [
+        const Icon(Icons.lock_clock_outlined, color: Color(0xFF555555), size: 18),
+        const SizedBox(width: 10),
+        const Expanded(
+          child: Text('期間ブロックを設定',
+              style: TextStyle(color: Color(0xFF888888), fontSize: 14)),
+        ),
+        const Icon(Icons.add, color: Color(0xFF555555), size: 18),
+      ])),
+    );
+  }
+
   Widget _dot(Color color) => Container(
         width: 10,
         height: 10,
@@ -1108,6 +1282,13 @@ class _HomeScreenState extends State<HomeScreen> {
         'Seed': '🌱',
       }[name] ??
       '🌱';
+}
+
+// 期間ブロックのプリセット時間定義
+class _BlockDuration {
+  final String label;
+  final int hours;
+  const _BlockDuration({required this.label, required this.hours});
 }
 
 // プラン選択ボトムシート
