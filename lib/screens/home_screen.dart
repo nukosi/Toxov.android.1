@@ -807,6 +807,14 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  // 緊急解除の残り秒数を "残りX時間Y分" 形式に整形する
+  String _formatEmergencyRemaining(int secs) {
+    final h = secs ~/ 3600;
+    final m = (secs % 3600) ~/ 60;
+    if (h > 0) return '残り${h}時間${m}分';
+    return '残り${m}分';
+  }
+
   // 期間ブロックの終了日時を "MM/DD HH:mm まで" 形式に整形する
   String _formatBlockUntil(String isoStr) {
     try {
@@ -909,7 +917,14 @@ class _HomeScreenState extends State<HomeScreen> {
                               fontSize: 15,
                               fontWeight: FontWeight.w500),
                         ),
-                        if (_config != null)
+                        if (emergency && _config?['emergency_remaining_secs'] != null)
+                          Text(
+                            _formatEmergencyRemaining(
+                                (_config!['emergency_remaining_secs'] as num).toInt()),
+                            style: const TextStyle(
+                                color: Color(0xFFFFA94D), fontSize: 12),
+                          )
+                        else if (_config != null)
                           Text(
                             '${_config!['block_start']} ～ ${_config!['block_end']}',
                             style: const TextStyle(
