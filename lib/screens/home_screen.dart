@@ -35,9 +35,15 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _appBlockerRunning = false;
   int _blockedAppCount = 0;
   bool _emergencyLoading = false;
+  bool _resumeLoading = false;
   int _tabIndex = 0;
 
   bool? _lastBlockState;
+  bool? _lastScheduleState; // スケジュールウィンドウ（08:00-21:00）の前回状態（期間ブロック中のポイント加算に使用）
+  // シールド使用直後のpollでemergency_unblockを二重送信しないためのフラグ。
+  // モバイル側で/api/emergencyがシールドを消費した直後に_poll()がemergency_unblockを
+  // /api/logに送ると、シールドが既に0なので実際の緊急解除として記録されストリークが消える。
+  bool _shieldJustUsed = false;
   late final ConfettiController _confettiController;
   int? _lastKnownStreak; // 前回pollのストリーク値（節目検知用）
 
@@ -122,12 +128,31 @@ class _HomeScreenState extends State<HomeScreen> {
         blockUntil: blockUntil,
       );
 
-      // ブロック状態の変化を検知してイベントをサーバーに記録する
+      // ブロック状態の変化を検知してイベントをサーバーに記録する。
+      // VPN状態ではなくスケジュール時刻の切り替わりに基づいて発火することで、
+      // 期間ブロック中（VPN24時間稼働）でもポイントが正常に加算される。
       final vpnRunning = await VpnBridge.isRunning();
-      if (vpnRunning && _lastBlockState == false) {
-        _api.postEvent('block_start').ignore();
-      } else if (!vpnRunning && _lastBlockState == true) {
-        _api.postEvent(emergency ? 'emergency_unblock' : 'block_end').ignore();
+      final scheduleActive = _isInScheduleWindow(blockStart, blockEnd);
+      if (emergency) {
+        // 緊急解除中: VPN停止を検知したら emergency_unblock を記録する。
+        // ただしシールド使用直後のpollは除く（_shieldJustUsedフラグで抑制）。
+        if (_lastBlockState == true && !vpnRunning) {
+          if (_shieldJustUsed) {
+            _shieldJustUsed = false;
+          } else {
+            _api.postEvent('emergency_unblock').ignore();
+          }
+        }
+        // 緊急解除解除後の次pollでblock_startが発火するようにリセットする
+        _lastScheduleState = null;
+      } else {
+        // 通常フロー: スケジュール（08:00/21:00）の切り替わりでイベントを発火する
+        if (scheduleActive && _lastScheduleState != true) {
+          _api.postEvent('block_start').ignore();
+        } else if (!scheduleActive && _lastScheduleState == true) {
+          _api.postEvent('block_end').ignore();
+        }
+        _lastScheduleState = scheduleActive;
       }
       _lastBlockState = vpnRunning;
 
@@ -197,6 +222,17 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  // 現在時刻がスケジュールのブロック時間帯内かどうかを返す（期間ブロックは考慮しない）
+  bool _isInScheduleWindow(String start, String end) {
+    final now = DateTime.now();
+    final nowMin = now.hour * 60 + now.minute;
+    int parseMin(String s) {
+      final parts = s.split(':');
+      return int.parse(parts[0]) * 60 + int.parse(parts[1]);
+    }
+    return nowMin >= parseMin(start) && nowMin < parseMin(end);
+  }
+
   bool _shouldBlock(Map<String, dynamic> config) {
     if (config['emergency_unblock'] == true) return false;
     // 期間ブロック中は時間帯に関わらず常時ブロック
@@ -244,6 +280,7 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       final res = await _api.activateEmergency();
       final shieldUsed = res['shield_used'] == true;
+      if (shieldUsed) _shieldJustUsed = true; // 次のpollでの二重送信を防ぐ
       await _poll();
       if (mounted && shieldUsed) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -261,6 +298,22 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     } finally {
       if (mounted) setState(() => _emergencyLoading = false);
+    }
+  }
+
+  Future<void> _resumeEmergency() async {
+    setState(() => _resumeLoading = true);
+    try {
+      await _api.resumeEmergency();
+      await _poll();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('エラーが発生しました')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _resumeLoading = false);
     }
   }
 
@@ -1016,7 +1069,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 const SizedBox(height: 20),
 
-                // ── 緊急解除ボタン（ブロック時間内のみ表示）──
+                // ── 緊急解除ボタン（ブロック時間内かつ未解除のときのみ表示）──
                 if (shouldBlockNow)
                   SizedBox(
                     width: double.infinity,
@@ -1038,6 +1091,32 @@ class _HomeScreenState extends State<HomeScreen> {
                                   strokeWidth: 2,
                                   color: Color(0xFFFF6B6B)))
                           : const Text('緊急解除（-6pt・ストリークリセット）',
+                              style: TextStyle(fontSize: 13)),
+                    ),
+                  ),
+
+                // ── ブロックに戻るボタン（緊急解除中のみ表示）──
+                if (emergency)
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton(
+                      onPressed: _resumeLoading ? null : _resumeEmergency,
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: const Color(0xFF4ADE80),
+                        side: const BorderSide(color: Color(0xFF1A3A1A)),
+                        backgroundColor: const Color(0xFF0A1A0A),
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(10)),
+                      ),
+                      child: _resumeLoading
+                          ? const SizedBox(
+                              height: 18,
+                              width: 18,
+                              child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Color(0xFF4ADE80)))
+                          : const Text('ブロックに戻る',
                               style: TextStyle(fontSize: 13)),
                     ),
                   ),
@@ -1411,31 +1490,6 @@ class _PlanSheet extends StatelessWidget {
         RegExp(r'(\d)(?=(\d{3})+$)'), (m) => '${m[1]},');
   }
 
-  void _showEarlybirdInfo(BuildContext context) {
-    showDialog<void>(
-      context: context,
-      builder: (_) => AlertDialog(
-        backgroundColor: const Color(0xFF1A1A1A),
-        title: const Text('アーリーバードとは？',
-            style: TextStyle(color: Colors.white, fontSize: 16)),
-        content: const Text(
-          '早期申し込み限定の特別価格プランです。\n\n'
-          '通常年額より大幅に割引された価格で、Premiumの全機能をご利用いただけます。\n\n'
-          '※この価格は予告なく終了する場合があります。',
-          style: TextStyle(
-              color: Color(0xFF888888), fontSize: 13, height: 1.6),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('閉じる',
-                style: TextStyle(color: Color(0xFFF97316))),
-          ),
-        ],
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return Padding(
@@ -1460,9 +1514,8 @@ class _PlanSheet extends StatelessWidget {
   }
 
   Widget _planTile(BuildContext context, Map<String, dynamic> plan) {
-    final planId       = plan['id'] as String? ?? '';
-    final label        = plan['label'] as String? ?? '';
-    final isEarlybird  = planId == 'earlybird';
+    final planId = plan['id'] as String? ?? '';
+    final label  = plan['label'] as String? ?? '';
 
     return GestureDetector(
       onTap: () {
@@ -1474,46 +1527,18 @@ class _PlanSheet extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
         decoration: BoxDecoration(
           color: const Color(0xFF111111),
-          border: Border.all(
-              color: isEarlybird
-                  ? const Color(0xFFF97316).withValues(alpha: 0.5)
-                  : const Color(0xFF2A2A2A)),
+          border: Border.all(color: const Color(0xFF2A2A2A)),
           borderRadius: BorderRadius.circular(12),
         ),
         child: Row(children: [
-          // ラベル＋バッジ
+          // ラベル
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(children: [
-                  Flexible(
-                    child: Text(label,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 15,
-                            fontWeight: FontWeight.w600)),
-                  ),
-                  if (isEarlybird) ...[
-                    const SizedBox(width: 6),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 6, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFF97316).withValues(alpha: 0.15),
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      child: const Text('おすすめ',
-                          style: TextStyle(
-                              color: Color(0xFFF97316),
-                              fontSize: 10,
-                              fontWeight: FontWeight.w700)),
-                    ),
-                  ],
-                ]),
-              ],
-            ),
+            child: Text(label,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600)),
           ),
           const SizedBox(width: 8),
           // 金額
@@ -1522,18 +1547,7 @@ class _PlanSheet extends StatelessWidget {
                   color: Color(0xFFF97316),
                   fontSize: 15,
                   fontWeight: FontWeight.w700)),
-          // アーリーバード説明ボタン
-          if (isEarlybird)
-            GestureDetector(
-              onTap: () => _showEarlybirdInfo(context),
-              child: const Padding(
-                padding: EdgeInsets.only(left: 6),
-                child: Icon(Icons.info_outline,
-                    color: Color(0xFF888888), size: 18),
-              ),
-            )
-          else
-            const SizedBox(width: 6),
+          const SizedBox(width: 6),
           const Icon(Icons.arrow_forward_ios,
               color: Color(0xFF555555), size: 13),
         ]),

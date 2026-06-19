@@ -13,6 +13,7 @@ class ApiService {
 
   String get logUrl              => configUrl.replaceFirst('/api/config/', '/api/log/');
   String get emergencyUrl        => configUrl.replaceFirst('/api/config/', '/api/emergency/');
+  String get resumeUrl           => configUrl.replaceFirst('/api/config/', '/api/resume/');
   String get statsUrl            => configUrl.replaceFirst('/api/config/', '/api/stats/');
   String get adminSetPlanUrl     => configUrl.replaceFirst('/api/config/', '/api/admin/set-plan/');
   String get blockUntilSetUrl    => configUrl.replaceFirst('/api/config/', '/api/block-until/set/');
@@ -90,6 +91,14 @@ class ApiService {
         .timeout(const Duration(seconds: 10));
     if (res.statusCode != 200) throw Exception('HTTP ${res.statusCode}');
     return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  // 緊急解除を終了してブロックを再開する
+  Future<void> resumeEmergency() async {
+    final res = await http
+        .post(Uri.parse(resumeUrl), headers: _headers)
+        .timeout(const Duration(seconds: 10));
+    if (res.statusCode != 200) throw Exception('HTTP ${res.statusCode}');
   }
 
   // ランキング・ログなどの統計情報を取得する
