@@ -35,6 +35,7 @@ dependencies:
   http: ^1.2.0                        # APIリクエスト
   shared_preferences: ^2.3.0          # トークンURLのローカル保存
   url_launcher: ^6.3.0               # ブラウザでStripe課金ページを開く
+  package_info_plus: ^8.0.0          # アプリのバージョンコードを取得する（更新チェック用）
   confetti: ^0.8.0                   # ストリーク節目の紙吹雪演出
   home_widget: ^0.7.0               # ホーム画面ウィジェット更新
   flutter_local_notifications: ^18.0.0  # ローカルプッシュ通知

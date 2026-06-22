@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:confetti/confetti.dart';
 import '../services/api_service.dart';
@@ -58,6 +59,7 @@ class _HomeScreenState extends State<HomeScreen> {
     NotificationService.init();
     _poll();
     _checkBatteryOptimization();
+    _checkForUpdate();
     _timer = Timer.periodic(const Duration(seconds: 30), (_) => _poll());
   }
 
@@ -318,6 +320,44 @@ class _HomeScreenState extends State<HomeScreen> {
     } finally {
       if (mounted) setState(() => _resumeLoading = false);
     }
+  }
+
+  Future<void> _checkForUpdate() async {
+    try {
+      final info = await PackageInfo.fromPlatform();
+      final currentCode = int.tryParse(info.buildNumber) ?? 0;
+      final latest = await ApiService.fetchLatestVersion();
+      final latestCode = (latest['version_code'] as num?)?.toInt() ?? 0;
+      final downloadUrl = latest['download_url'] as String? ?? '';
+      if (!mounted || latestCode <= currentCode || downloadUrl.isEmpty) return;
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => AlertDialog(
+          backgroundColor: const Color(0xFF1A1A1A),
+          title: const Text('アップデートあり', style: TextStyle(color: Colors.white)),
+          content: const Text(
+            '新しいバージョンが公開されています。\nアップデートしてください。',
+            style: TextStyle(color: Color(0xFFAAAAAA)),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('後で', style: TextStyle(color: Color(0xFF555555))),
+            ),
+            TextButton(
+              onPressed: () async {
+                Navigator.pop(context);
+                final uri = Uri.parse(downloadUrl);
+                if (await canLaunchUrl(uri)) await launchUrl(uri);
+              },
+              child: const Text('今すぐ更新',
+                  style: TextStyle(color: Color(0xFFF97316))),
+            ),
+          ],
+        ),
+      );
+    } catch (_) {}
   }
 
   void _checkMilestone(int streak) {

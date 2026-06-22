@@ -123,6 +123,15 @@ class ApiService {
         .toList();
   }
 
+  // サーバーから最新APKのバージョン情報を取得する（認証不要）
+  static Future<Map<String, dynamic>> fetchLatestVersion() async {
+    final res = await http
+        .get(Uri.parse('$_serverBase/api/version'), headers: _headers)
+        .timeout(const Duration(seconds: 5));
+    if (res.statusCode != 200) throw Exception('HTTP ${res.statusCode}');
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
   // 管理者専用：プランをfree/premiumに切り替える
   Future<void> adminSetPlan(String plan) async {
     final res = await http
