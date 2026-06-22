@@ -281,6 +281,8 @@ class _HomeScreenState extends State<HomeScreen> {
       final res = await _api.activateEmergency();
       final shieldUsed = res['shield_used'] == true;
       if (shieldUsed) _shieldJustUsed = true; // 次のpollでの二重送信を防ぐ
+      // アプリが閉じていても24時間後に自動でブロックに戻るアラームをセットする
+      await VpnBridge.scheduleEmergencyResume(resumeUrl: _api.resumeUrl);
       await _poll();
       if (mounted && shieldUsed) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -305,6 +307,7 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() => _resumeLoading = true);
     try {
       await _api.resumeEmergency();
+      await VpnBridge.cancelEmergencyResume(); // 手動再開なのでアラームを取り消す
       await _poll();
     } catch (e) {
       if (mounted) {

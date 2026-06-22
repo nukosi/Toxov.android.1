@@ -8,6 +8,10 @@
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <!-- Android 13以降で通知を表示するために必要 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 再起動後にサービスを自動復帰させるために必要 -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- バッテリー最適化の除外をリクエストするために必要 -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- アプリブロック: フォアグラウンドアプリの検出に必要（設定から許可が必要）-->
     <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
         tools:ignore="ProtectedPermissions"
@@ -69,6 +73,62 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="App usage monitoring for internet detox" />
         </service>
+
+        <!-- サイトブロック：ブラウザのURLをアクセシビリティAPIで検知してオーバーレイ表示する -->
+        <service
+            android:name=".ToxovAccessibilityService"
+            android:exported="true"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/toxov_accessibility_config" />
+        </service>
+
+        <!-- 緊急解除24時間タイムアウトで自動ブロック再開するAlarmManagerレシーバー -->
+        <receiver
+            android:name=".EmergencyResumeReceiver"
+            android:exported="false" />
+
+        <!-- 再起動後にAppBlockerServiceを自動復帰させるレシーバー -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
+
+        <!-- ホーム画面ウィジェット -->
+        <receiver
+            android:name=".ToxovWidgetProvider"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/toxov_widget_info"/>
+        </receiver>
+
+        <!-- flutter_local_notifications: スケジュール通知の発火レシーバー -->
+        <receiver
+            android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver"
+            android:exported="false" />
+        <!-- flutter_local_notifications: 再起動後にスケジュール通知を復元するレシーバー -->
+        <receiver
+            android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
 
         <meta-data
             android:name="flutterEmbedding"

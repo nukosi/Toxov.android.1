@@ -39,4 +39,20 @@ class VpnBridge {
     final result = await _channel.invokeMethod<bool>('isRunning');
     return result ?? false;
   }
+
+  // 緊急解除から24時間後にブロックを自動再開するAlarmManagerアラームをセットする
+  static Future<void> scheduleEmergencyResume({
+    required String resumeUrl,
+    int delayMs = 24 * 3600 * 1000,
+  }) async {
+    await _channel.invokeMethod('scheduleEmergencyResume', {
+      'delayMs':   delayMs,
+      'resumeUrl': resumeUrl,
+    });
+  }
+
+  // 緊急解除アラームをキャンセルする（手動でブロックに戻ったとき）
+  static Future<void> cancelEmergencyResume() async {
+    await _channel.invokeMethod('cancelEmergencyResume');
+  }
 }

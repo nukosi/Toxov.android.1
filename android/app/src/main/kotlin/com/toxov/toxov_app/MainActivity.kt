@@ -1,7 +1,9 @@
 package com.toxov.toxov_app
 
 import android.Manifest
+import android.app.AlarmManager
 import android.app.AppOpsManager
+import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
@@ -11,6 +13,7 @@ import android.net.VpnService
 import android.os.Build
 import android.os.PowerManager
 import android.os.Process
+import android.os.SystemClock
 import android.provider.Settings
 import androidx.core.app.ActivityCompat
 import io.flutter.embedding.android.FlutterActivity
@@ -68,6 +71,33 @@ class MainActivity : FlutterActivity() {
                         result.success(null)
                     }
                     "isRunning" -> result.success(ToxovVpnService.isRunning)
+
+                    // 24時間後に緊急解除を自動終了するアラームをセットする
+                    "scheduleEmergencyResume" -> {
+                        val delayMs = call.argument<Long>("delayMs") ?: (24L * 3600 * 1000)
+                        val resumeUrl = call.argument<String>("resumeUrl") ?: ""
+                        getSharedPreferences("toxov_boot", Context.MODE_PRIVATE).edit()
+                            .putString("emergency_resume_url", resumeUrl)
+                            .apply()
+                        val pi = emergencyResumePendingIntent()
+                        val am = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+                        // setAndAllowWhileIdle: Dozeモード中でも発火する（±9分以内）。
+                        // 24時間という精度に対して9分の誤差は許容範囲のため exactは不要。
+                        am.setAndAllowWhileIdle(
+                            AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                            SystemClock.elapsedRealtime() + delayMs,
+                            pi
+                        )
+                        result.success(null)
+                    }
+
+                    // 緊急解除アラームをキャンセルする（手動でブロックに戻ったとき）
+                    "cancelEmergencyResume" -> {
+                        val am = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+                        am.cancel(emergencyResumePendingIntent())
+                        result.success(null)
+                    }
+
                     else -> result.notImplemented()
                 }
             }
@@ -230,6 +260,17 @@ class MainActivity : FlutterActivity() {
             packageName
         )
         return mode == AppOpsManager.MODE_ALLOWED
+    }
+
+    // 緊急解除自動再開アラームのPendingIntentを生成する（schedule/cancel両方で同一のものを使う）
+    private fun emergencyResumePendingIntent(): PendingIntent {
+        val intent = Intent(this, EmergencyResumeReceiver::class.java).apply {
+            action = EmergencyResumeReceiver.ACTION
+        }
+        return PendingIntent.getBroadcast(
+            this, 0, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
     }
 
     // ホーム画面（ランチャー）から起動できるアプリを全件取得する
